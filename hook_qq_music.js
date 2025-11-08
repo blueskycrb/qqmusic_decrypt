@@ -1,4 +1,4 @@
-﻿const TARGET_DLL = "QQMusicCommon.dll";
+const TARGET_DLL = "QQMusicCommon.dll";
 
 var EncAndDesMediaFileConstructorAddr = Module.findExportByName(
   TARGET_DLL,
@@ -25,9 +25,11 @@ var EncAndDesMediaFileReadAddr = Module.findExportByName(
   "?Read@EncAndDesMediaFile@@QAEKPAEK_J@Z"
 );
 
+// NOTE: only changed the constructor return type to 'void' (was "pointer").
+// This prevents ABI/stack mismatch that can corrupt behavior.
 var EncAndDesMediaFileConstructor = new NativeFunction(
   EncAndDesMediaFileConstructorAddr,
-  "pointer",
+  "void",
   ["pointer"],
   "thiscall"
 );
@@ -55,29 +57,86 @@ var EncAndDesMediaFileGetSize = new NativeFunction(
 
 var EncAndDesMediaFileRead = new NativeFunction(
   EncAndDesMediaFileReadAddr,
-  "uint",
+  "uint32",
   ["pointer", "pointer", "uint32", "uint64"],
   "thiscall"
 );
 
 rpc.exports = {
-  decrypt: function (srcFileName, tmpFileName) {    
+  decrypt: function (srcFileName, tmpFileName) {
+    // Basic input validation
+    if (!srcFileName || typeof srcFileName !== "string") {
+      throw new Error("Invalid srcFileName");
+    }
+    if (!tmpFileName || typeof tmpFileName !== "string") {
+      throw new Error("Invalid tmpFileName");
+    }
+
     var EncAndDesMediaFileObject = Memory.alloc(0x28);
     EncAndDesMediaFileConstructor(EncAndDesMediaFileObject);
 
-    var fileNameUtf16 = Memory.allocUtf16String(srcFileName);
-    EncAndDesMediaFileOpen(EncAndDesMediaFileObject, fileNameUtf16, 1, 0);
+    try {
+      var fileNameUtf16 = Memory.allocUtf16String(srcFileName);
 
-    var fileSize = EncAndDesMediaFileGetSize(EncAndDesMediaFileObject);
+      // Check open result and give clearer error
+      var opened = EncAndDesMediaFileOpen(
+        EncAndDesMediaFileObject,
+        fileNameUtf16,
+        1,
+        0
+      );
+      if (!opened) {
+        throw new Error("Open failed for source file: " + srcFileName);
+      }
 
-    var buffer = Memory.alloc(fileSize);
-    EncAndDesMediaFileRead(EncAndDesMediaFileObject, buffer, fileSize, 0);
+      var fileSize = EncAndDesMediaFileGetSize(EncAndDesMediaFileObject);
+      if (!fileSize || fileSize === 0) {
+        throw new Error("File size is zero or could not be retrieved for: " + srcFileName);
+      }
 
-    var data = buffer.readByteArray(fileSize);
-    EncAndDesMediaFileDestructor(EncAndDesMediaFileObject);
+      var buffer = Memory.alloc(fileSize);
 
-    var tmpFile = new File(tmpFileName, "wb");
-    tmpFile.write(data);
-    return true
+      var readBytes = EncAndDesMediaFileRead(
+        EncAndDesMediaFileObject,
+        buffer,
+        fileSize,
+        0
+      );
+
+      if (!readBytes || readBytes === 0) {
+        throw new Error("Read returned 0 bytes for: " + srcFileName);
+      }
+
+      var data = buffer.readByteArray(readBytes);
+
+      // Write to tmp file with robust error handling
+      try {
+        var tmpFile = new File(tmpFileName, "wb");
+        // ensure data is not null
+        if (data === null) {
+          throw new Error("No data to write (read returned null)");
+        }
+        tmpFile.write(data);
+        // Some environments support flush/close methods — call if present
+        if (typeof tmpFile.flush === "function") {
+          try { tmpFile.flush(); } catch (e) {}
+        }
+        if (typeof tmpFile.close === "function") {
+          try { tmpFile.close(); } catch (e) {}
+        }
+      } catch (e) {
+        // Convert low-level 'No such file or directory' into clearer message
+        throw new Error("Failed to write tmp file '" + tmpFileName + "': " + e.message);
+      }
+
+      return true;
+    } finally {
+      // Always call destructor to avoid leaks/crashes
+      try {
+        EncAndDesMediaFileDestructor(EncAndDesMediaFileObject);
+      } catch (e) {
+        // ignore destructor errors but don't mask original errors
+      }
+    }
   },
 };
