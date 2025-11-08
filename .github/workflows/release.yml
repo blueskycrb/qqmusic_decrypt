@@ -15,7 +15,7 @@ jobs:
           persist-credentials: false
       - uses: taiki-e/create-gh-release-action@v1
         with:
-          changelog: "CHANGELOG.md"
+          changelog: ""
           branch: master
           title: "$version"
         env:
